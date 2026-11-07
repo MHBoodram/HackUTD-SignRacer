@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+
+# IDE files
+.vscode/
+.idea/
+
+# Large dataset files or models you don't want committed to GitHub directly
+data/raw_snapshots/
+models/*.pkl
+.DS_Store
