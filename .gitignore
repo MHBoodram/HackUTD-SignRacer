@@ -13,3 +13,15 @@ venv/
 data/raw_snapshots/
 models/*.pkl
 .DS_Store
+
+data/asl_dataset/**/*
+!data/asl_dataset/**/
+!data/asl_dataset/**/hand1_0_bot_seg_1_cropped.jpeg
+stdb_token*.json
+signracer_settings.json
+__pycache__/
+bin/
+obj/
+stdb_token*.json
+signracer_settings.json
+__pycache__/
