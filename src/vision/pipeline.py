@@ -1,73 +1,164 @@
 from typing import Optional
-
+ 
 import cv2
 import mediapipe as mp
 import numpy as np
+ 
+# Constants
 
-# Constants for MediaPipe Holistic feature extraction
 NUM_HAND_LANDMARKS = 21
-NUM_WRIST_INDEX = 0
-
-FACE_NOSE_TIP_INDEX = 0
-EYEBROW_INDECES = (70,63,105,66,107,336,296,334,293,300)
-MOUTH_INDECES = (0,17,61,291)
-FACE_INDECES = EYEBROW_INDECES + MOUTH_INDECES
-
-NUM_FACE_LANDMARKS = len(FACE_INDECES)
-HAND_FEATURES_DIM = NUM_HAND_LANDMARKS * 3
-FACE_FEATURES_DIM = NUM_FACE_LANDMARKS * 3
-FEATURE_DIM = HAND_FEATURES_DIM + FACE_FEATURES_DIM
-
+HAND_WRIST_INDEX = 0
+ 
+FACE_NOSE_TIP_INDEX = 1
+EYEBROW_INDICES = (70, 63, 105, 66, 107, 336, 296, 334, 293, 300)
+MOUTH_INDICES = (0, 17, 61, 291)
+FACE_INDICES = EYEBROW_INDICES + MOUTH_INDICES  # 14 landmarks
+ 
+NUM_FACE_LANDMARKS_USED = len(FACE_INDICES)  # 14
+HAND_FEATURE_DIM = NUM_HAND_LANDMARKS * 3  # 63
+FACE_FEATURE_DIM = NUM_FACE_LANDMARKS_USED * 3  # 42
+FEATURE_DIM = HAND_FEATURE_DIM + FACE_FEATURE_DIM  # 105
+ 
 mp_holistic = mp.solutions.holistic
-
-# Holistic model configuration
-
-def create_holistic(static_image_mode: bool = False, model_complexity: int = 1, min_detection_confidence: float = 0.5, min_tracking_confidence: float = 0.5):
-    return mp_holistic.Holistic(static_image_mode=static_image_mode,
-                                 model_complexity=model_complexity,
-                                 min_detection_confidence=min_detection_confidence,
-                                 min_tracking_confidence=min_tracking_confidence)
-
+ 
+ 
+# Holistic helpers
+ 
+def create_holistic(
+    static_image_mode: bool = False,
+    model_complexity: int = 1,
+    min_detection_confidence: float = 0.5,
+    min_tracking_confidence: float = 0.5,
+):
+    """Create a configured MediaPipe Holistic instance (usable as a context manager)."""
+    return mp_holistic.Holistic(
+        static_image_mode=static_image_mode,
+        model_complexity=model_complexity,
+        smooth_landmarks=not static_image_mode,
+        refine_face_landmarks=False,
+        min_detection_confidence=min_detection_confidence,
+        min_tracking_confidence=min_tracking_confidence,
+    )
+ 
+ 
+# Normalization
+ 
 def normalize_relative(points: np.ndarray, anchor_index: int) -> np.ndarray:
+    """
+    Make a landmark set position-independent by subtracting an anchor landmark.
+ 
+    Args:
+        points: array of shape (N, 3) holding x, y, z per landmark.
+        anchor_index: index of the landmark that becomes the origin.
+ 
+    Returns:
+        Array of shape (N, 3) where the anchor landmark sits at (0, 0, 0).
+    """
     points = np.asarray(points, dtype=np.float32)
     return points - points[anchor_index]
-
-# Extracts a flat normalized 105-float vector from the MediaPipe Holistic results
-
+  
+# Extraction
+ 
 def _landmarks_to_array(landmark_list) -> np.ndarray:
+    """Convert a MediaPipe landmark list to an (N, 3) float32 array."""
     return np.array(
-        [[lm.x, lm.y, lm.z] for lm in landmark_list.landmark], dtype=np.float32
+        [[lm.x, lm.y, lm.z] for lm in landmark_list.landmark],
+        dtype=np.float32,
     )
-
+ 
+ 
 def extract_hand_vector(results) -> Optional[np.ndarray]:
-    if results.right_hand_landmarks is not None:
+    """Return the 63-value wrist-relative right-hand vector, or None if no right hand."""
+    if results.right_hand_landmarks is None:
         return None
-
+ 
+    hand = _landmarks_to_array(results.right_hand_landmarks)
+    if hand.shape[0] != NUM_HAND_LANDMARKS:
+        return None
+ 
+    return normalize_relative(hand, HAND_WRIST_INDEX).flatten()
+ 
+ 
+def extract_face_vector(results) -> Optional[np.ndarray]:
+    """Return the 42-value nose-relative face vector, or None if no face detected."""
+    if results.face_landmarks is None:
+        return None
+ 
     face = _landmarks_to_array(results.face_landmarks)
-
-    if face.shape[0] <= max(FACE_INDECES):
+    if face.shape[0] <= max(FACE_INDICES):
         return None
-
+ 
+    # Normalize against the nose tip using the full mesh, then slice the 14 points.
     face_relative = normalize_relative(face, FACE_NOSE_TIP_INDEX)
-    return face_relative[list(FACE_INDECES)].flatten()
-
+    return face_relative[list(FACE_INDICES)].flatten()
+ 
+ 
 def extract_features(results, require_face: bool = False) -> Optional[np.ndarray]:
+    """
+    Build the 105-float feature vector from a MediaPipe Holistic result.
+ 
+    Args:
+        results: the object returned by ``holistic.process(rgb_image)``.
+        require_face: if True, return None when no face is detected. If False
+            (default), a missing face is filled with 42 zeros so hand-only
+            images (e.g. cropped ASL dataset photos) remain usable.
+ 
+    Returns:
+        np.ndarray of shape (105,) and dtype float32, or None if the right
+        hand is missing (or the face is missing while ``require_face`` is True).
+    """
     hand_vec = extract_hand_vector(results)
-
     if hand_vec is None:
         return None
-
+ 
     face_vec = extract_face_vector(results)
     if face_vec is None:
         if require_face:
             return None
-        face_vec = np.zeros(FACE_FEATURES_DIM, dtype=np.float32)
-
+        face_vec = np.zeros(FACE_FEATURE_DIM, dtype=np.float32)
+ 
     features = np.concatenate([hand_vec, face_vec]).astype(np.float32)
     assert features.shape[0] == FEATURE_DIM
     return features
-
+ 
+ 
+def create_hands(static_image_mode: bool = True, min_detection_confidence: float = 0.5):
+    """
+    Create a MediaPipe Hands instance (usable as a context manager).
+ 
+    Holistic is pose-driven and finds nothing in close-up hand photos with no
+    body in frame. Hands detects the hand directly and uses the same 21-point
+    layout, so its output is compatible with the Holistic hand vector.
+    """
+    return mp.solutions.hands.Hands(
+        static_image_mode=static_image_mode,
+        max_num_hands=1,
+        min_detection_confidence=min_detection_confidence,
+    )
+ 
+ 
+def extract_hand_only_features(hands, rgb_image: np.ndarray) -> Optional[np.ndarray]:
+    """
+    Fallback extraction using the Hands model. Returns a 105-float vector with the
+    wrist-relative hand values and 42 zeros for the face block, or None if no hand.
+    """
+    results = hands.process(rgb_image)
+    if not results.multi_hand_landmarks:
+        return None
+ 
+    hand = _landmarks_to_array(results.multi_hand_landmarks[0])
+    if hand.shape[0] != NUM_HAND_LANDMARKS:
+        return None
+ 
+    hand_vec = normalize_relative(hand, HAND_WRIST_INDEX).flatten()
+    face_vec = np.zeros(FACE_FEATURE_DIM, dtype=np.float32)
+    return np.concatenate([hand_vec, face_vec]).astype(np.float32)
+ 
+ 
 def process_frame(holistic, bgr_frame: np.ndarray, require_face: bool = False) -> Optional[np.ndarray]:
+    """
+    Convenience wrapper for live webcam frames: BGR -> RGB -> Holistic -> features.
+    """
     rgb = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
     rgb.flags.writeable = False
     results = holistic.process(rgb)
