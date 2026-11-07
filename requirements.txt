@@ -1,4 +1,5 @@
 numpy>=1.26.4,<2.0.0
+pandas>=2.0.0,<3.0.0
 opencv-python>=4.9.0.80,<5.0.0.0
 mediapipe>=0.10.14
 scikit-learn>=1.4.0
