@@ -68,6 +68,7 @@ BAR_BG_COLOR     = (50, 54, 70)
 
 # --- Testing ---
 DEBUG_KEYBOARD   = True            # type on keyboard to advance player 1
+
 # ================================================================
 
 
