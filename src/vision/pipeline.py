@@ -136,21 +136,57 @@ def create_hands(static_image_mode: bool = True, min_detection_confidence: float
         min_detection_confidence=min_detection_confidence,
     )
  
+
+HAND_DETECTION_ATTEMPTS = (
+    (0.0, 0),
+    (0.0, 256),
+    (0.3, 0),
+    (0.3, 256),
+    (0.6, 320),
+)
+
+def _detect_hand_relative(hands, rgb_image: np.ndarray) -> Optional[np.ndarray]:
+    height, width = rgb_image.shape[:2]
+
+    for pad_ratio, target_side in HAND_DETECTION_ATTEMPTS:
+        image = rgb_image
+        pad = int(round(pad_ratio * max(height, width)))
+        if pad > 0:
+            image = cv2.copyMakeBorder(image, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=(0,0,0))
+        if target_side and max(image.shape[:2]) < target_side:
+            scale = target_side / max(image.shape[:2])
+            image = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+
+        results = hands.process(image)
+        if not results.multi_hand_landmarks:
+            continue
+
+        hand = _landmarks_to_array(results.multi_hand_landmarks[0])
+        if hand.shape[0] != NUM_HAND_LANDMARKS:
+            continue
+
+        relative = normalize_relative(hand, HAND_WRIST_INDEX)
+        padded_w = width + 2 * pad
+        padded_h = height + 2 * pad
+        relative[:, 0] *= padded_w / width
+        relative[:, 1] *= padded_h / height
+        relative[:,2] *= padded_w / width
+        return relative 
  
 def extract_hand_only_features(hands, rgb_image: np.ndarray) -> Optional[np.ndarray]:
     """
     Fallback extraction using the Hands model. Returns a 105-float vector with the
     wrist-relative hand values and 42 zeros for the face block, or None if no hand.
     """
-    results = hands.process(rgb_image)
-    if not results.multi_hand_landmarks:
+    relative = _detect_hand_relative(hands, rgb_image)
+    if relative is None:
         return None
  
     hand = _landmarks_to_array(results.multi_hand_landmarks[0])
     if hand.shape[0] != NUM_HAND_LANDMARKS:
         return None
  
-    hand_vec = normalize_relative(hand, HAND_WRIST_INDEX).flatten()
+    hand_vec = relative.astype(np.float32).flatten()
     face_vec = np.zeros(FACE_FEATURE_DIM, dtype=np.float32)
     return np.concatenate([hand_vec, face_vec]).astype(np.float32)
  
