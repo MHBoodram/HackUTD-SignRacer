@@ -1,3 +1,4 @@
+import hashlib
 import re
 import sys
 import threading
@@ -77,7 +78,50 @@ WEBCAM_BORDER_COLOR = (255, 255, 255)
 TEXT_FONT_SIZE    = 40
 TEXT_LINE_SPACING = 64
 TEXT_AREA         = pygame.Rect(40, 380, SCREEN_WIDTH - 80, 300)
-GAME_TEXT         = "the quick brown fox jumps over the lazy dog"
+# Race text: one phrase is picked per room (both players get the same one).
+# Add your own: lowercase letters and spaces only.
+GAME_PHRASES = [
+    "the quick brown fox jumps over the lazy dog",
+    "sign language is a beautiful way to talk",
+    "practice makes perfect",
+    "hands up for a fast race",
+    "never stop learning something new",
+    "keep your fingers steady and clear",
+    "a journey of a thousand miles begins with one step",
+    "speed and accuracy win the race",
+    "hello how are you today",
+    "good luck and have fun",
+    "the early bird catches the worm",
+    "every expert was once a beginner",
+    "fingers moving fast and sure",
+    "pack my box with five dozen liquor jugs",
+    "how vexingly quick daft zebras jump",
+    "sphinx of black quartz judge my vow",
+    "we love hackathons and late night coding",
+    "a picture is worth a thousand words",
+    "actions speak louder than words",
+    "time flies when you are having fun",
+    "the sun rises in the east",
+    "coffee and code keep us going",
+    "clear hands make clear signs",
+    "learn to sign and make a new friend",
+    "the best way to learn is to practice",
+    "smile and sign with confidence",
+    "stay calm and keep signing",
+    "the finish line is just ahead",
+    "winners never quit and quitters never win",
+    "one small step for a signer",
+    "jump high run fast sign well",
+    "patience and practice build skill",
+    "slow is smooth and smooth is fast",
+    "look at the camera and show your hand",
+    "mountains are climbed one step at a time",
+    "a quiet mind makes for steady hands",
+    "ready set sign",
+    "good things come to those who wait",
+    "if at first you do not succeed try again",
+    "knowledge is power",
+]
 CARET_THICKNESS   = 4
 
 # --- Player labels / progress bars ---
@@ -133,7 +177,7 @@ CAMERA_MAX_INDEX   = 5             # highest camera index to try (0..5)
 # --- Testing ---
 DEBUG_KEYBOARD   = False           # True = type on keyboard to advance (for testing)
 # ================================================================
-# Run a second copy for testing on one PC:  python main.py 2
+# Run a second copy for testing on one PC:  python ui.py 2
 # (each profile gets its own SpacetimeDB identity)
 PROFILE = sys.argv[1] if len(sys.argv) > 1 else "1"
 
@@ -308,6 +352,12 @@ class Button:
     def clicked(self, event):
         return (event.type == pygame.MOUSEBUTTONDOWN and event.button == 1
                 and self.rect.collidepoint(event.pos))
+
+
+def pick_game_text(room_code):
+    """Both players derive the same phrase from the shared room code."""
+    digest = hashlib.sha256(room_code.encode("utf-8")).hexdigest()
+    return GAME_PHRASES[int(digest, 16) % len(GAME_PHRASES)]
 
 
 def layout_text(text, font, max_width):
@@ -547,7 +597,8 @@ def main():
 
     net = Net(PROFILE)
     cap = None
-    char_layout = layout_text(GAME_TEXT, text_font, TEXT_AREA.width)
+    game_text = GAME_PHRASES[0]        # replaced by a room-based pick when a race starts
+    char_layout = layout_text(game_text, text_font, TEXT_AREA.width)
     glyph_cache = {}
 
     def glyph(ch, color):
@@ -615,7 +666,9 @@ def main():
         state = "PRACTICE"
 
     def start_countdown():
-        nonlocal state, game_start, winner, progress, cap
+        nonlocal state, game_start, winner, progress, cap, game_text, char_layout
+        game_text = pick_game_text(net.room_code)
+        char_layout = layout_text(game_text, text_font, TEXT_AREA.width)
         progress = [0, 0]
         net.my_progress = 0
         winner = None
@@ -680,8 +733,8 @@ def main():
                         back_to_menu()
                     elif (state == "GAME" and DEBUG_KEYBOARD and winner is None
                           and time.time() >= game_start
-                          and progress[0] < len(GAME_TEXT)
-                          and event.unicode == GAME_TEXT[progress[0]]):
+                          and progress[0] < len(game_text)
+                          and event.unicode == game_text[progress[0]]):
                         progress[0] += 1
 
             elif state == "PRACTICE":
@@ -773,8 +826,8 @@ def main():
                 if ok:
                     if playing:
                         recognized = recognize_sign(frame, holistic, model)
-                        if (recognized and progress[0] < len(GAME_TEXT)
-                                and recognized.lower() == GAME_TEXT[progress[0]].lower()):
+                        if (recognized and progress[0] < len(game_text)
+                                and recognized.lower() == game_text[progress[0]].lower()):
                             progress[0] += 1
                     webcam_surface = frame_to_surface(frame)
             cam_rect = pygame.Rect(SCREEN_WIDTH - WEBCAM_SIZE[0] - WEBCAM_MARGIN,
@@ -784,12 +837,12 @@ def main():
             pygame.draw.rect(screen, WEBCAM_BORDER_COLOR, cam_rect, WEBCAM_BORDER)
 
             # Spaces have no sign, so skip over them
-            while progress[0] < len(GAME_TEXT) and GAME_TEXT[progress[0]] == " ":
+            while progress[0] < len(game_text) and game_text[progress[0]] == " ":
                 progress[0] += 1
 
             # Hint for the letter the player is on (left of the webcam)
-            if show_hints and winner is None and progress[0] < len(GAME_TEXT):
-                cur = GAME_TEXT[progress[0]]
+            if show_hints and winner is None and progress[0] < len(game_text):
+                cur = game_text[progress[0]]
                 hint_rect = pygame.Rect(cam_rect.x - HINT_GAP - HINT_SIZE[0],
                                         cam_rect.y, *HINT_SIZE)
                 pygame.draw.rect(screen, HINT_BOX_COLOR, hint_rect, border_radius=12)
@@ -804,12 +857,12 @@ def main():
 
             # Sync with the database
             net.my_progress = progress[0]
-            progress[1] = min(net.opp_progress, len(GAME_TEXT))
+            progress[1] = min(net.opp_progress, len(game_text))
 
             if winner is None:
-                if progress[0] >= len(GAME_TEXT):
+                if progress[0] >= len(game_text):
                     winner = "You"
-                elif progress[1] >= len(GAME_TEXT):
+                elif progress[1] >= len(game_text):
                     winner = "Opponent"
 
             # Room code + progress bars
@@ -821,7 +874,7 @@ def main():
                 bar_bg = pygame.Rect(BAR_POS[0], y + 26, *BAR_SIZE)
                 pygame.draw.rect(screen, BAR_BG_COLOR, bar_bg, border_radius=8)
                 fill = bar_bg.copy()
-                fill.width = int(BAR_SIZE[0] * progress[i] / len(GAME_TEXT))
+                fill.width = int(BAR_SIZE[0] * progress[i] / len(game_text))
                 pygame.draw.rect(screen, PLAYER_COLORS[i], fill, border_radius=8)
 
             # Text (bottom) with both players tracked
