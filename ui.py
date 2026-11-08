@@ -53,7 +53,7 @@ BUTTON_WIDTH     = 360
 BUTTON_HEIGHT    = 80
 BUTTON_SPACING   = 30
 BUTTON_FONT_SIZE = 36
-BUTTON_START_Y   = 260
+BUTTON_START_Y   = 200
 CREATE_BUTTON_TEXT = "Create Room"
 JOIN_BUTTON_TEXT   = "Join with Code"
 
@@ -107,8 +107,25 @@ CHECKBOX_SIZE     = 28
 CHECKBOX_COLOR    = (255, 255, 255)
 CHECKBOX_CHECK_COLOR = (80, 200, 120)
 CHECKBOX_GAME_POS = (40, 190)      # top-left of the checkbox during a game
-CHECKBOX_MENU_Y   = 480            # y of the checkbox on the main menu
+CHECKBOX_MENU_Y   = 530            # y of the checkbox on the main menu
 CHECKBOX_LOBBY_Y  = 570            # y of the checkbox in the lobby
+
+# --- Practice mode ---
+PRACTICE_BUTTON_TEXT = "Practice"
+PRACTICE_MODES   = [("Letters", "abcdefghijklmnopqrstuvwxyz"),
+                    ("Numbers", "0123456789"),
+                    ("All",     "abcdefghijklmnopqrstuvwxyz0123456789")]   # Tab cycles through these
+PRACTICE_PAUSE   = 0.7             # seconds to pause after a correct answer / skip
+PRACTICE_TARGET_FONT_SIZE = 260
+PRACTICE_TARGET_Y = 520            # vertical center of the big target letter
+PRACTICE_STATS_POS = (40, 20)      # top-left of the stats text
+PRACTICE_STATS_SPACING = 30
+
+# --- Camera switching ---
+CAMERA_BUTTON_TEXT = "Change camera"
+CAMERA_BUTTON_SIZE = (230, 36)
+CAMERA_BUTTON_GAP  = 8             # gap between the webcam and the button
+CAMERA_MAX_INDEX   = 5             # highest camera index to try (0..5)
 
 # --- Testing ---
 DEBUG_KEYBOARD   = False           # True = type on keyboard to advance (for testing)
@@ -319,20 +336,31 @@ def recognize_sign(frame):
     return None
 
 
-def load_hint_setting():
+def load_settings():
     try:
         with open(SETTINGS_FILE, encoding="utf-8") as f:
-            return bool(json.load(f).get("hints", HINT_DEFAULT_ON))
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
-        return HINT_DEFAULT_ON
+        return {}
+
+
+def save_settings(**updates):
+    data = load_settings()
+    data.update(updates)
+    try:
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except OSError:
+        pass
+
+
+def load_hint_setting():
+    return bool(load_settings().get("hints", HINT_DEFAULT_ON))
 
 
 def save_hint_setting(value):
-    try:
-        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-            json.dump({"hints": value}, f)
-    except OSError:
-        pass
+    save_settings(hints=value)
 
 
 class HintManager:
@@ -388,6 +416,81 @@ def draw_checkbox(screen, font, text, checked, topleft):
     screen.blit(label, label.get_rect(midleft=(box.right + 10, box.centery)))
 
 
+class Practice:
+    """State for the offline practice range (random letters/numbers)."""
+
+    def __init__(self):
+        self.mode = 0
+        self.reset()
+
+    def reset(self):
+        self.score = 0
+        self.streak = 0
+        self.best = 0
+        self.total_time = 0.0
+        self.target = ""
+        self.target_start = time.time()
+        self.last_detected = ""
+        self.flash_text = ""
+        self.flash_color = P1_COLOR
+        self.flash_until = 0.0
+        self.next_target()
+
+    def mode_name(self):
+        return PRACTICE_MODES[self.mode][0]
+
+    def next_target(self, pause=0.0):
+        pool = PRACTICE_MODES[self.mode][1]
+        choices = [c for c in pool if c != self.target] or list(pool)
+        self.target = random.choice(choices)
+        self.target_start = time.time() + pause
+
+    def flash(self, text, color):
+        self.flash_text = text
+        self.flash_color = color
+        self.flash_until = time.time() + PRACTICE_PAUSE
+
+    def correct(self):
+        elapsed = max(0.0, time.time() - self.target_start)
+        self.score += 1
+        self.streak += 1
+        self.best = max(self.best, self.streak)
+        self.total_time += elapsed
+        self.flash(f"Correct!  {elapsed:.1f}s", P1_COLOR)
+        self.next_target(PRACTICE_PAUSE)
+
+    def skip(self):
+        self.streak = 0
+        self.flash(f"Skipped {self.target.upper()}", UNTYPED_COLOR)
+        self.next_target(PRACTICE_PAUSE)
+
+    def cycle_mode(self):
+        self.mode = (self.mode + 1) % len(PRACTICE_MODES)
+        self.target = ""
+        self.next_target()
+
+
+def draw_hint_box(screen, hints, ch, cam_rect, font):
+    hint_rect = pygame.Rect(cam_rect.x - HINT_GAP - HINT_SIZE[0], cam_rect.y, *HINT_SIZE)
+    pygame.draw.rect(screen, HINT_BOX_COLOR, hint_rect, border_radius=12)
+    img = hints.get(ch)
+    if img:
+        screen.blit(img, img.get_rect(center=hint_rect.center))
+    else:
+        msg = font.render("No hint image", True, UNTYPED_COLOR)
+        screen.blit(msg, msg.get_rect(center=hint_rect.center))
+    tag = font.render(f"Sign: {ch.upper()}", True, P1_COLOR)
+    screen.blit(tag, tag.get_rect(midtop=(hint_rect.centerx, hint_rect.bottom + 6)))
+
+
+def draw_small_button(screen, font, text, rect, enabled=True):
+    hovered = enabled and rect.collidepoint(pygame.mouse.get_pos())
+    color = BUTTON_DISABLED if not enabled else (BUTTON_HOVER if hovered else BUTTON_COLOR)
+    pygame.draw.rect(screen, color, rect, border_radius=10)
+    label = font.render(text, True, BUTTON_TEXT_COLOR)
+    screen.blit(label, label.get_rect(center=rect.center))
+
+
 def draw_centered(screen, font, text, color, y):
     surf = font.render(text, True, color)
     screen.blit(surf, surf.get_rect(center=(SCREEN_WIDTH // 2, y)))
@@ -410,11 +513,17 @@ def main():
 
     hints = HintManager()
     show_hints = load_hint_setting()   # stays on/off across rounds and restarts
+    practice = Practice()
+    cam_index = int(load_settings().get("camera", WEBCAM_INDEX))   # remembered between runs
+    cam_state = {"switching": False, "pending": None, "msg": "", "msg_until": 0.0}
+    target_font = pygame.font.Font(None, PRACTICE_TARGET_FONT_SIZE)
 
     cx = SCREEN_WIDTH // 2
     create_btn = Button(CREATE_BUTTON_TEXT, (cx, BUTTON_START_Y + BUTTON_HEIGHT // 2), button_font)
     join_btn = Button(JOIN_BUTTON_TEXT,
                       (cx, BUTTON_START_Y + BUTTON_HEIGHT * 3 // 2 + BUTTON_SPACING), button_font)
+    practice_btn = Button(PRACTICE_BUTTON_TEXT,
+                          (cx, BUTTON_START_Y + BUTTON_HEIGHT * 5 // 2 + BUTTON_SPACING * 2), button_font)
 
     net = Net(PROFILE)
     cap = None
@@ -440,9 +549,50 @@ def main():
             return pygame.Rect(cx - w // 2, CHECKBOX_MENU_Y, w, CHECKBOX_SIZE)
         if state == "LOBBY":
             return pygame.Rect(cx - w // 2, CHECKBOX_LOBBY_Y, w, CHECKBOX_SIZE)
-        if state == "GAME":
+        if state in ("GAME", "PRACTICE"):
             return pygame.Rect(*CHECKBOX_GAME_POS, w, CHECKBOX_SIZE)
         return None
+
+    def camera_button_rect():
+        if state not in ("GAME", "PRACTICE"):
+            return None
+        r = pygame.Rect(0, 0, *CAMERA_BUTTON_SIZE)
+        r.topright = (SCREEN_WIDTH - WEBCAM_MARGIN,
+                      WEBCAM_MARGIN + WEBCAM_SIZE[1] + CAMERA_BUTTON_GAP)
+        return r
+
+    def switch_camera():
+        """Look for the next working camera in a background thread."""
+        if cam_state["switching"]:
+            return
+        cam_state["switching"] = True
+        start = cam_index
+
+        def worker():
+            found = None
+            for step in range(1, CAMERA_MAX_INDEX + 1):
+                idx = (start + step) % (CAMERA_MAX_INDEX + 1)
+                test = cv2.VideoCapture(idx)
+                if test.isOpened() and test.read()[0]:
+                    found = (test, idx)
+                    break
+                test.release()
+            if found:
+                save_settings(camera=found[1])
+                cam_state["pending"] = found
+            else:
+                cam_state["msg"] = "No other camera found"
+                cam_state["msg_until"] = time.time() + 3
+            cam_state["switching"] = False
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def start_practice():
+        nonlocal state, cap
+        practice.reset()
+        if cap is None:
+            cap = cv2.VideoCapture(cam_index)
+        state = "PRACTICE"
 
     def start_countdown():
         nonlocal state, game_start, winner, progress, cap
@@ -451,7 +601,7 @@ def main():
         winner = None
         game_start = time.time() + COUNTDOWN_SECONDS
         if cap is None:
-            cap = cv2.VideoCapture(WEBCAM_INDEX)
+            cap = cv2.VideoCapture(cam_index)
         state = "GAME"
 
     def back_to_menu():
@@ -474,6 +624,9 @@ def main():
                 if cb and cb.collidepoint(event.pos):
                     show_hints = not show_hints
                     save_hint_setting(show_hints)
+                cam_btn = camera_button_rect()
+                if cam_btn and cam_btn.collidepoint(event.pos):
+                    switch_camera()
 
             if state == "MENU":
                 if net.ready and not net.busy:
@@ -483,6 +636,8 @@ def main():
                         typed_code = ""
                         net.error = ""
                         state = "JOIN"
+                if not net.busy and practice_btn.clicked(event):
+                    start_practice()
 
             elif state == "JOIN":
                 if event.type == pygame.KEYDOWN:
@@ -508,6 +663,19 @@ def main():
                           and event.unicode == GAME_TEXT[progress[0]]):
                         progress[0] += 1
 
+            elif state == "PRACTICE":
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        state = "MENU"
+                    elif event.key == pygame.K_RETURN:
+                        practice.skip()
+                    elif event.key == pygame.K_TAB:
+                        practice.cycle_mode()
+                    elif (DEBUG_KEYBOARD and event.unicode
+                          and time.time() >= practice.flash_until
+                          and event.unicode.lower() == practice.target):
+                        practice.correct()
+
         # ---- react to network results ----
         if state in ("MENU", "JOIN") and net.result == "created":
             net.result = None
@@ -518,6 +686,14 @@ def main():
         elif state == "LOBBY" and net.opp_joined:
             start_countdown()
 
+        if cam_state["pending"]:
+            new_cap, new_idx = cam_state["pending"]
+            cam_state["pending"] = None
+            if cap is not None:
+                cap.release()
+            cap, cam_index = new_cap, new_idx
+            webcam_surface = None
+
         screen.fill(BG_COLOR)
 
         # ---------------- MENU ----------------
@@ -526,13 +702,14 @@ def main():
             enabled = net.ready and not net.busy
             create_btn.draw(screen, enabled)
             join_btn.draw(screen, enabled)
+            practice_btn.draw(screen, not net.busy)
             msg = net.error or net.status
             if net.busy:
                 msg, col = "Working...", UNTYPED_COLOR
             else:
                 col = ERROR_COLOR if net.error or "problem" in msg or "reach" in msg else UNTYPED_COLOR
             if msg:
-                draw_centered(screen, label_font, msg, col, 520)
+                draw_centered(screen, label_font, msg, col, 590)
 
         # ---------------- JOIN ----------------
         elif state == "JOIN":
@@ -656,6 +833,67 @@ def main():
             if net.status and "problem" in net.status:
                 screen.blit(label_font.render(net.status, True, ERROR_COLOR),
                             (BAR_POS[0], SCREEN_HEIGHT - 30))
+
+        elif state == "PRACTICE":
+            now = time.time()
+            cam_ok = False
+            if cap is not None and cap.isOpened():
+                ok, frame = cap.read()
+                if ok:
+                    cam_ok = True
+                    webcam_surface = frame_to_surface(frame)
+                    if now >= practice.flash_until:
+                        detected = recognize_sign(frame)
+                        practice.last_detected = detected or ""
+                        if detected and detected.lower() == practice.target:
+                            practice.correct()
+            cam_rect = pygame.Rect(SCREEN_WIDTH - WEBCAM_SIZE[0] - WEBCAM_MARGIN,
+                                   WEBCAM_MARGIN, *WEBCAM_SIZE)
+            if webcam_surface and cam_ok:
+                screen.blit(webcam_surface, cam_rect)
+            pygame.draw.rect(screen, WEBCAM_BORDER_COLOR, cam_rect, WEBCAM_BORDER)
+
+            # Webcam test info under the camera
+            cam_text = f"Camera {cam_index} OK" if cam_ok else "No camera found"
+            cam_surf = label_font.render(cam_text, True, P1_COLOR if cam_ok else ERROR_COLOR)
+            screen.blit(cam_surf, cam_surf.get_rect(topright=(cam_rect.right, cam_rect.bottom + 76)))
+            det = practice.last_detected.upper() if practice.last_detected else "-"
+            det_surf = label_font.render(f"Detected: {det}", True, TITLE_COLOR)
+            screen.blit(det_surf, det_surf.get_rect(topright=(cam_rect.right, cam_rect.bottom + 106)))
+
+            # Stats (top left)
+            avg = f"{practice.total_time / practice.score:.1f}s" if practice.score else "-"
+            lines = [("Practice", P1_COLOR),
+                     (f"Range: {practice.mode_name()}", UNTYPED_COLOR),
+                     (f"Score: {practice.score}", TITLE_COLOR),
+                     (f"Streak: {practice.streak}  (best {practice.best})", TITLE_COLOR),
+                     (f"Avg time: {avg}", TITLE_COLOR)]
+            for i, (text, color) in enumerate(lines):
+                screen.blit(label_font.render(text, True, color),
+                            (PRACTICE_STATS_POS[0], PRACTICE_STATS_POS[1] + i * PRACTICE_STATS_SPACING))
+
+            # Hint box (uses the shared "Show hints" checkbox)
+            if show_hints:
+                draw_hint_box(screen, hints, practice.target, cam_rect, label_font)
+
+            # Big target letter
+            draw_centered(screen, button_font, "Sign this:", UNTYPED_COLOR, PRACTICE_TARGET_Y - 130)
+            draw_centered(screen, target_font, practice.target.upper(), TITLE_COLOR, PRACTICE_TARGET_Y)
+            if now < practice.flash_until:
+                draw_centered(screen, button_font, practice.flash_text, practice.flash_color,
+                              PRACTICE_TARGET_Y + 130)
+            draw_centered(screen, label_font,
+                          f"Enter: skip     Tab: change range ({practice.mode_name()})     Esc: menu",
+                          UNTYPED_COLOR, SCREEN_HEIGHT - 25)
+
+        cam_btn = camera_button_rect()
+        if cam_btn:
+            label = ("Searching..." if cam_state["switching"]
+                     else f"{CAMERA_BUTTON_TEXT} ({cam_index})")
+            draw_small_button(screen, label_font, label, cam_btn, not cam_state["switching"])
+            if cam_state["msg"] and time.time() < cam_state["msg_until"]:
+                note = label_font.render(cam_state["msg"], True, ERROR_COLOR)
+                screen.blit(note, note.get_rect(topright=(cam_btn.right, cam_btn.bottom + 4)))
 
         cb = checkbox_rect()
         if cb:
