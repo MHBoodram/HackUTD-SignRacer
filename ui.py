@@ -176,6 +176,7 @@ CAMERA_MAX_INDEX   = 5             # highest camera index to try (0..5)
 
 # --- Testing ---
 DEBUG_KEYBOARD   = False           # True = type on keyboard to advance (for testing)
+SHOW_NET_DEBUG   = True            # small sync/identity line on screen to help debug the connection
 # ================================================================
 # Run a second copy for testing on one PC:  python ui.py 2
 # (each profile gets its own SpacetimeDB identity)
@@ -188,6 +189,7 @@ PROFILE = sys.argv[1] if len(sys.argv) > 1 else "1"
 # Room table column order (matches the C# struct):
 #   0 Code, 1 P1, 2 P2, 3 P1Progress, 4 P2Progress
 COL_CODE, COL_P1, COL_P2, COL_P1_PROG, COL_P2_PROG = range(5)
+ROOM_COLUMNS = ["code", "p1", "p2", "p1progress", "p2progress"]   # normalised names (lowercase, no underscores)
 
 
 def _ident(cell):
@@ -202,7 +204,13 @@ def _ident(cell):
 
 def _option_is_none(cell):
     """SpacetimeDB encodes Option as [tag, value]; tag 1 = None."""
-    return isinstance(cell, (list, tuple)) and len(cell) == 2 and cell[0] == 1
+    if cell is None:
+        return True
+    if isinstance(cell, (list, tuple)):
+        return len(cell) == 2 and cell[0] == 1
+    if isinstance(cell, dict):
+        return "none" in cell or "1" in cell or 1 in cell
+    return False
 
 
 class Net:
@@ -221,6 +229,9 @@ class Net:
         self.opp_joined = False
         self.opp_progress = 0
         self.my_progress = 0
+        self.last_sent = 0                 # last value successfully sent to the server
+        self.last_sync = 0.0               # time of the last successful poll
+        self._last_err = ""
 
         self._run_id = 0
         threading.Thread(target=self._connect, daemon=True).start()
@@ -249,12 +260,30 @@ class Net:
             text = r.text.strip().splitlines()
             raise RuntimeError(text[0] if text else f"HTTP {r.status_code}")
 
-    def _query(self, sql):
+    def _query_full(self, sql):
         r = requests.post(f"{STDB_URL}/v1/database/{DB_NAME}/sql",
                           data=sql, headers=self.headers, timeout=HTTP_TIMEOUT)
         if r.status_code != 200:
             raise RuntimeError(f"{r.status_code}: {r.text.strip()[:150]}")
-        return r.json()[0]["rows"]
+        return r.json()[0]
+
+    def _query(self, sql):
+        return self._query_full(sql)["rows"]
+
+    @staticmethod
+    def _norm(name):
+        if isinstance(name, dict):
+            name = name.get("some", next(iter(name.values()), ""))
+        return str(name).lower().replace("_", "")
+
+    def _rooms(self, sql):
+        """Query the room table; rows come back as dicts keyed by column name."""
+        result = self._query_full(sql)
+        elements = (result.get("schema") or {}).get("elements") or []
+        names = [self._norm(e.get("name")) for e in elements]
+        if set(ROOM_COLUMNS) - set(names):      # unexpected naming: fall back to struct order
+            names = ROOM_COLUMNS
+        return [dict(zip(names, row)) for row in result["rows"]]
 
     # ---------- actions from the UI ----------
     def create_room(self):
@@ -280,10 +309,10 @@ class Net:
             self.busy = False
 
     def _create_room(self):
-        before = {row[COL_CODE] for row in self._query(f"SELECT * FROM {TABLE_ROOM}")}
+        before = {row["code"] for row in self._rooms(f"SELECT * FROM {TABLE_ROOM}")}
         self._call(REDUCER_CREATE)
-        mine = [row[COL_CODE] for row in self._query(f"SELECT * FROM {TABLE_ROOM}")
-                if _ident(row[COL_P1]) == self.identity]
+        mine = [row["code"] for row in self._rooms(f"SELECT * FROM {TABLE_ROOM}")
+                if _ident(row["p1"]) == self.identity]
         new = [c for c in mine if c not in before] or mine
         if not new:
             raise RuntimeError("Room created but code not found")
@@ -291,6 +320,10 @@ class Net:
         self.result = "created"
 
     def _join_room(self, code):
+        safe = re.sub(r"[^A-Za-z0-9]", "", code)
+        rooms = self._rooms(f"SELECT * FROM {TABLE_ROOM} WHERE {COLUMN_CODE} = '{safe}'")
+        if rooms and _ident(rooms[0]["p1"]) == self.identity:
+            raise RuntimeError("You created this room. Use a second profile to join it: python ui.py 2")
         self._call(REDUCER_JOIN, code)
         self._enter_room(code, side=1)
         self.result = "joined"
@@ -311,24 +344,34 @@ class Net:
         self.room_code = ""
 
     def _poll_loop(self, run_id):
-        last_sent = 0
+        self.last_sent = 0
         code = re.sub(r"[^A-Za-z0-9]", "", self.room_code)
         while run_id == self._run_id:
             try:
-                if self.my_progress != last_sent:
+                if self.my_progress != self.last_sent:
                     sending = self.my_progress
                     self._call(REDUCER_PROGRESS, code, sending)
-                    last_sent = sending
-                rows = self._query(f"SELECT * FROM {TABLE_ROOM} WHERE {COLUMN_CODE} = '{code}'")
-                if rows:
-                    row = rows[0]
+                    self.last_sent = sending
+                rooms = self._rooms(f"SELECT * FROM {TABLE_ROOM} WHERE {COLUMN_CODE} = '{code}'")
+                if rooms:
+                    row = rooms[0]
                     if self.my_side == 0:
-                        self.opp_joined = not _option_is_none(row[COL_P2])
-                        self.opp_progress = row[COL_P2_PROG]
+                        self.opp_joined = not _option_is_none(row["p2"])
+                        self.opp_progress = int(row["p2progress"])
                     else:
-                        self.opp_progress = row[COL_P1_PROG]
+                        self.opp_progress = int(row["p1progress"])
+                    self.last_sync = time.time()
+                    self._last_err = ""
+                    if "problem" in self.status:
+                        self.status = ""
+                else:
+                    raise RuntimeError("room not found")
             except Exception as e:
-                self.status = f"Connection problem: {e}"
+                msg = f"Connection problem: {e}"
+                self.status = msg
+                if msg != self._last_err:          # print each new error once
+                    print(f"[net] {msg}")
+                    self._last_err = msg
             time.sleep(POLL_INTERVAL)
 
 
@@ -784,6 +827,9 @@ def main():
                 col = ERROR_COLOR if net.error or "problem" in msg or "reach" in msg else UNTYPED_COLOR
             if msg:
                 draw_centered(screen, label_font, msg, col, 590)
+            if SHOW_NET_DEBUG and net.identity:
+                draw_centered(screen, label_font, f"profile {PROFILE}  -  id {net.identity[:8]}",
+                              UNTYPED_COLOR, SCREEN_HEIGHT - 30)
 
         # ---------------- JOIN ----------------
         elif state == "JOIN":
@@ -904,8 +950,15 @@ def main():
                               P1_COLOR if winner == "You" else P2_COLOR, 300)
                 draw_centered(screen, label_font, "Esc for menu", UNTYPED_COLOR, 350)
 
+            dbg, dbg_color = "", UNTYPED_COLOR
             if net.status and "problem" in net.status:
-                screen.blit(label_font.render(net.status, True, ERROR_COLOR),
+                dbg, dbg_color = net.status, ERROR_COLOR
+            elif SHOW_NET_DEBUG:
+                ago = f"{time.time() - net.last_sync:.1f}s ago" if net.last_sync else "never"
+                dbg = (f"sync: you {net.my_progress} (sent {net.last_sent}) | "
+                       f"opponent {net.opp_progress} | updated {ago}")
+            if dbg:
+                screen.blit(label_font.render(dbg[:110], True, dbg_color),
                             (BAR_POS[0], SCREEN_HEIGHT - 30))
 
         elif state == "PRACTICE":
