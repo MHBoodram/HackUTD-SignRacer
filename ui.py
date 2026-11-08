@@ -7,8 +7,11 @@ import os
 import random
 
 import cv2
+import joblib
 import pygame
 import requests
+
+from src.vision.pipeline import FEATURE_DIM, create_holistic, process_frame
 
 # ============================ CONFIG ============================
 # --- SpacetimeDB ---
@@ -331,9 +334,12 @@ def frame_to_surface(frame):
     return pygame.image.frombuffer(frame.tobytes(), WEBCAM_SIZE, "RGB")
 
 
-def recognize_sign(frame):
-    """HOOK: plug your ASL model in here. Return a letter (str) or None."""
-    return None
+def recognize_sign(frame, holistic, model):
+    """Predict a sign from one webcam frame, or return None when no hand is detected."""
+    features = process_frame(holistic, frame)
+    if features is None:
+        return None
+    return str(model.predict(features.reshape(1, -1))[0])
 
 
 def load_settings():
@@ -498,6 +504,20 @@ def draw_centered(screen, font, text, color, y):
 
 # ------------------------------------------------------------------
 def main():
+    model_path = os.path.join(BASE_DIR, "models", "asl_classifier.plk")
+    if not os.path.isfile(model_path):
+        raise FileNotFoundError(
+            f"Trained model not found at {model_path}. "
+            "Generate the dataset and run `python -m src.vision.model_trainer` first."
+        )
+    model = joblib.load(model_path)
+    if model.n_features_in_ != FEATURE_DIM:
+        raise ValueError(
+            f"Model expects {model.n_features_in_} features, but the vision pipeline "
+            f"produces {FEATURE_DIM}. Regenerate the dataset and retrain the model."
+        )
+    holistic = create_holistic()
+
     pygame.init()
     screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
     pygame.display.set_caption(f"{WINDOW_CAPTION} (profile {PROFILE})")
@@ -616,6 +636,7 @@ def main():
                 net.leave()
                 if cap:
                     cap.release()
+                holistic.close()
                 pygame.quit()
                 sys.exit()
 
@@ -751,7 +772,7 @@ def main():
                 ok, frame = cap.read()
                 if ok:
                     if playing:
-                        recognized = recognize_sign(frame)
+                        recognized = recognize_sign(frame, holistic, model)
                         if (recognized and progress[0] < len(GAME_TEXT)
                                 and recognized.lower() == GAME_TEXT[progress[0]].lower()):
                             progress[0] += 1
@@ -843,7 +864,7 @@ def main():
                     cam_ok = True
                     webcam_surface = frame_to_surface(frame)
                     if now >= practice.flash_until:
-                        detected = recognize_sign(frame)
+                        detected = recognize_sign(frame, holistic, model)
                         practice.last_detected = detected or ""
                         if detected and detected.lower() == practice.target:
                             practice.correct()

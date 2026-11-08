@@ -182,10 +182,6 @@ def extract_hand_only_features(hands, rgb_image: np.ndarray) -> Optional[np.ndar
     if relative is None:
         return None
  
-    hand = _landmarks_to_array(results.multi_hand_landmarks[0])
-    if hand.shape[0] != NUM_HAND_LANDMARKS:
-        return None
- 
     hand_vec = relative.astype(np.float32).flatten()
     face_vec = np.zeros(FACE_FEATURE_DIM, dtype=np.float32)
     return np.concatenate([hand_vec, face_vec]).astype(np.float32)

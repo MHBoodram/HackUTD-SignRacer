@@ -1,4 +1,5 @@
 import logging
+import math
 import sys
 from pathlib import Path
 import joblib
@@ -45,17 +46,22 @@ def train_model() -> bool:
  
     logger.info("Loaded %d samples, %d features, %d classes.", len(features), features.shape[1], labels.nunique())
  
-    # Stratify only when every class has enough samples to appear in both splits.
-    stratify = labels if labels.value_counts().min() >= 2 else None
-    if stratify is None:
-        logger.warning("Some classes have fewer than 2 samples; using a non-stratified split.")
+    class_count = labels.nunique()
+    test_count = math.ceil(len(labels) * TEST_SIZE)
+    if labels.value_counts().min() < 2 or test_count < class_count:
+        logger.error(
+            "Not enough samples for a stratified train/test split. "
+            "Add more images so every class has at least 2 samples and the test split "
+            "contains at least one sample per class."
+        )
+        return False
  
     x_train, x_test, y_train, y_test = train_test_split(
         features,
         labels,
         test_size=TEST_SIZE,
         random_state=RANDOM_STATE,
-        stratify=stratify,
+        stratify=labels,
     )
     logger.info("Train samples: %d | Test samples: %d", len(x_train), len(x_test))
  
